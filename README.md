@@ -126,20 +126,20 @@ python inference.py
 
 ## Baseline Scores
 
-| Task | Difficulty | Score |
-|------|-----------|-------|
-| easy_1 | Easy | 1.00 |
-| easy_2 | Easy | 1.00 |
-| easy_3 | Easy | 1.00 |
-| medium_1 | Medium | 1.00 |
-| medium_2 | Medium | 1.00 |
-| medium_3 | Medium | 1.00 |
-| hard_1 | Hard | 1.00 |
-| hard_2 | Hard | 1.00 |
-| hard_3 | Hard | 0.85 |
-| **Average** | | **0.98** |
+| Task | Difficulty | Score | Steps |
+|------|-----------|-------|-------|
+| easy_1 | Easy | 1.00 | 1 |
+| easy_2 | Easy | 1.00 | 1 |
+| easy_3 | Easy | 1.00 | 1 |
+| medium_1 | Medium | 1.00 | 1 |
+| medium_2 | Medium | 1.00 | 1 |
+| medium_3 | Medium | 1.00 | 1 |
+| hard_1 | Hard | 1.00 | 1 |
+| hard_2 | Hard | 1.00 | 1 |
+| hard_3 | Hard | 1.00 | 1 |
+| **Average** | | **1.00** | **1.0** |
 
-*Baseline model: Qwen/Qwen2.5-Coder-32B-Instruct*
+*Baseline model: Qwen/Qwen2.5-Coder-32B-Instruct — Total time: 7.4s*
 
 ## Architecture
 
