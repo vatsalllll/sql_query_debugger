@@ -1,0 +1,5 @@
+name: sql_debugger
+version: "1.0.0"
+description: "SQL Query Debugger - fix broken SQL queries against a live database"
+action: SQLAction
+observation: SQLObservation
