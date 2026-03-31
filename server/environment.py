@@ -2,6 +2,7 @@
 SQL Debugger Environment — Core logic.
 
 Implements the OpenEnv Environment interface for SQL query debugging.
+Supports both static tasks (predefined bugs) and dynamic tasks (random bug injection).
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from typing import Any, Optional
 from openenv.core.env_server.interfaces import Environment
 
 from ..models import SQLAction, SQLObservation, SQLState
+from .bug_injector import inject_bug, InjectedBug
 from .grader import SQLGrader
 from .sql_engine import SQLiteEngine
 from .tasks import ALL_TASKS, SQLTask, get_task_by_index
@@ -22,6 +24,10 @@ class SQLDebuggerEnv(Environment):
 
     The agent receives a broken SQL query, database schema, and expected output.
     It must iteratively fix the query by submitting corrected versions.
+
+    For static tasks (seeds 0-8): uses predefined broken queries.
+    For dynamic tasks (seeds 9+): injects random bugs into correct queries,
+    making every episode unique.
     """
 
     SUPPORTS_CONCURRENT_SESSIONS = True
@@ -32,7 +38,11 @@ class SQLDebuggerEnv(Environment):
         self._grader = SQLGrader()
         self._state = SQLState()
         self._current_task: Optional[SQLTask] = None
+        self._current_broken_query: str = ""
+        self._current_bug: Optional[InjectedBug] = None
         self._best_reward: float = 0.0
+        self._hint_general: str = ""
+        self._hint_specific: str = ""
 
     def reset(
         self,
@@ -40,18 +50,39 @@ class SQLDebuggerEnv(Environment):
         episode_id: Optional[str] = None,
         **kwargs: Any,
     ) -> SQLObservation:
-        """Start a new debugging episode with a broken SQL task."""
-        # Pick task deterministically from seed, or randomly
+        """Start a new debugging episode.
+
+        Args:
+            seed: Task selection + bug injection seed.
+                  Seeds 0-8: static tasks with predefined bugs.
+                  Seeds 9+: dynamic tasks with randomly injected bugs.
+                  None: random task with random bug.
+        """
         if seed is not None:
             task = get_task_by_index(seed)
         else:
             import random
             task = random.choice(ALL_TASKS)
+            seed = random.randint(0, 999999)
 
         self._current_task = task
         self._best_reward = 0.0
 
-        # Create fresh SQLite engine for each episode (thread-safe)
+        # Determine broken query: static (predefined) or dynamic (injected)
+        if task.broken_query is not None:
+            self._current_broken_query = task.broken_query
+            self._current_bug = None
+            self._hint_general = task.hint_general
+            self._hint_specific = task.hint_specific
+        else:
+            # Dynamic bug injection
+            broken, bug = inject_bug(task.correct_query, task.difficulty, seed=seed)
+            self._current_broken_query = broken
+            self._current_bug = bug
+            self._hint_general = bug.hint_general
+            self._hint_specific = bug.hint_specific
+
+        # Create fresh SQLite engine
         self._engine = SQLiteEngine()
         self._engine.setup(task.schema_sql, task.seed_data_sql)
 
@@ -70,7 +101,7 @@ class SQLDebuggerEnv(Environment):
             reward=0.0,
             task_id=task.task_id,
             difficulty=task.difficulty,
-            broken_query=task.broken_query,
+            broken_query=self._current_broken_query,
             schema_description=task.schema_sql.strip(),
             expected_output=self._format_rows(task.expected_output),
             execution_result="",
@@ -129,7 +160,7 @@ class SQLDebuggerEnv(Environment):
             reward=reward,
             task_id=task.task_id,
             difficulty=task.difficulty,
-            broken_query=task.broken_query,
+            broken_query=self._current_broken_query,
             schema_description=task.schema_sql.strip(),
             expected_output=self._format_rows(task.expected_output),
             execution_result=exec_result,
@@ -151,12 +182,11 @@ class SQLDebuggerEnv(Environment):
         lines = [str(row) for row in rows]
         return "\n".join(lines)
 
-    @staticmethod
-    def _generate_hint(step_count: int, task: SQLTask, last_error: Optional[str]) -> str:
+    def _generate_hint(self, step_count: int, task: SQLTask, last_error: Optional[str]) -> str:
         """Generate progressive hints based on step count."""
         if step_count <= 2:
             return f"Task: {task.description}"
         elif step_count <= 3:
-            return task.hint_general
+            return self._hint_general or f"Check your query against the schema."
         else:
-            return task.hint_specific
+            return self._hint_specific or self._hint_general or f"Review the error message carefully."
