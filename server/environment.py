@@ -68,14 +68,17 @@ class SQLDebuggerEnv(Environment):
         self._current_task = task
         self._best_reward = 0.0
 
-        # Determine broken query: static (predefined) or dynamic (injected)
-        if task.broken_query is not None:
+        # Bug injection: always dynamic when seed > 100, use static for low seeds
+        # This ensures reproducible baseline (seeds 0-8) AND variety for evaluation
+        use_static = task.broken_query is not None and seed is not None and seed < 100
+
+        if use_static:
             self._current_broken_query = task.broken_query
             self._current_bug = None
             self._hint_general = task.hint_general
             self._hint_specific = task.hint_specific
         else:
-            # Dynamic bug injection
+            # Dynamic bug injection — every seed produces a unique broken query
             broken, bug = inject_bug(task.correct_query, task.difficulty, seed=seed)
             self._current_broken_query = broken
             self._current_bug = bug
