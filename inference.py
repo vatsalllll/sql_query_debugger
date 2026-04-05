@@ -31,9 +31,10 @@ from sql_debugger.models import SQLAction, SQLObservation
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-Coder-32B-Instruct")
-API_KEY = os.getenv("HF_TOKEN", "")
+API_KEY = os.getenv("HF_TOKEN")
 
-IMAGE_NAME = "vatsalhf30/sql-debugger"
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+IMAGE_NAME = LOCAL_IMAGE_NAME or "vatsalhf30/sql-debugger"
 BENCHMARK = "sql_debugger"
 TASK_NAME = "sql_debug"
 MAX_STEPS = 12
