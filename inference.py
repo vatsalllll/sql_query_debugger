@@ -1,8 +1,8 @@
 """
 SQL Debugger — Baseline Inference Script
 
-Runs an LLM agent against all 9 SQL debugging tasks and reports scores.
-Uses OpenAI-compatible API via environment variables.
+Runs an LLM agent against SQL debugging tasks and reports scores.
+Uses structured [START], [STEP], [END] logging format required by OpenEnv evaluation.
 
 Environment variables:
     API_BASE_URL  — LLM API endpoint (default: https://router.huggingface.co/v1)
@@ -12,14 +12,15 @@ Environment variables:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
 import sys
 import time
+from typing import List, Optional
 
 from openai import OpenAI
-
-from sql_debugger import SQLDebuggerClient, SQLAction
 
 # ---------------------------------------------------------------------------
 # Configuration from environment variables
@@ -28,8 +29,14 @@ from sql_debugger import SQLDebuggerClient, SQLAction
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-Coder-32B-Instruct")
 API_KEY = os.getenv("HF_TOKEN", "")
-
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
+
+BENCHMARK = "sql_debugger"
+MAX_STEPS = 12
+SUCCESS_SCORE_THRESHOLD = 0.8
+TEMPERATURE = 0.1
+MAX_TOKENS = 512
+FALLBACK_QUERY = "SELECT 1;"
 
 SYSTEM_PROMPT = """You are an expert SQL debugger. You will be given:
 1. A database schema (CREATE TABLE statements)
@@ -51,27 +58,53 @@ Example response format:
 SELECT name, age FROM users WHERE age > 25;
 ```"""
 
-TEMPERATURE = 0.1
-MAX_TOKENS = 512
-FALLBACK_QUERY = "SELECT 1;"
-NUM_TASKS = 9
+# Task seeds to evaluate
+TASK_SEEDS = list(range(9)) + [100, 200, 300, 400, 500]
 
+
+# ---------------------------------------------------------------------------
+# Structured Logging — Required format for evaluation
+# ---------------------------------------------------------------------------
+
+def log_start(task: str, env: str, model: str) -> None:
+    """Emit [START] log entry."""
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    """Emit [STEP] log entry."""
+    print(
+        f"[STEP] step={step} action={json.dumps(action)} "
+        f"reward={reward:.4f} done={done} error={json.dumps(error)}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    """Emit [END] log entry."""
+    print(
+        f"[END] success={success} steps={steps} "
+        f"score={score:.4f} rewards={json.dumps(rewards)}",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# SQL extraction and prompt building
+# ---------------------------------------------------------------------------
 
 def extract_sql(response_text: str) -> str:
     """Extract SQL query from model response (```sql blocks or raw text)."""
-    # Try ```sql blocks first
     pattern = r"```sql\s*(.*?)\s*```"
     matches = re.findall(pattern, response_text, re.DOTALL | re.IGNORECASE)
     if matches:
         return matches[-1].strip()
 
-    # Try ``` blocks without language tag
     pattern = r"```\s*(.*?)\s*```"
     matches = re.findall(pattern, response_text, re.DOTALL)
     if matches:
         return matches[-1].strip()
 
-    # Fallback: return entire response stripped
     cleaned = response_text.strip()
     if cleaned.upper().startswith(("SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "CREATE")):
         return cleaned
@@ -105,97 +138,131 @@ def build_prompt(observation, history: list[str]) -> str:
     return "\n".join(parts)
 
 
-def run_episode(env, client: OpenAI, seed: int) -> tuple[float, int]:
-    """Run a single debugging episode. Returns (final_reward, steps_taken)."""
-    result = env.reset(seed=seed)
-    observation = result.observation
-    history = []
-    final_reward = 0.0
-    steps = 0
+def get_model_message(
+    client: OpenAI,
+    observation,
+    history: list[str],
+) -> str:
+    """Call the LLM and return the extracted SQL query."""
+    user_prompt = build_prompt(observation, history)
 
-    while not result.done:
-        user_prompt = build_prompt(observation, history)
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
+    try:
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+        )
+        response_text = completion.choices[0].message.content or ""
+    except Exception as exc:
+        print(f"[DEBUG] Model request failed: {exc}. Using fallback.", flush=True)
+        response_text = f"```sql\n{FALLBACK_QUERY}\n```"
 
-        try:
-            completion = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-                temperature=TEMPERATURE,
-                max_tokens=MAX_TOKENS,
-            )
-            response_text = completion.choices[0].message.content or ""
-        except Exception as exc:
-            print(f"    Model request failed: {exc}. Using fallback.")
-            response_text = f"```sql\n{FALLBACK_QUERY}\n```"
+    return extract_sql(response_text)
 
-        query = extract_sql(response_text)
-        steps += 1
-        print(f"    Step {steps}: {query[:80]}{'...' if len(query) > 80 else ''}")
 
-        result = env.step(SQLAction(query=query))
+# ---------------------------------------------------------------------------
+# Main — async entry point matching OpenEnv evaluation format
+# ---------------------------------------------------------------------------
+
+async def run_task(env, client: OpenAI, seed: int, task_name: str) -> float:
+    """Run a single task and return the final score."""
+    from sql_debugger.models import SQLAction
+
+    history: List[str] = []
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
+
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+
+    try:
+        result = env.reset(seed=seed)
         observation = result.observation
-        final_reward = result.reward or 0.0
+        last_reward = 0.0
 
-        error_flag = f" [ERROR: {observation.execution_error[:50]}]" if observation.execution_error else ""
-        history.append(f"Step {steps}: reward={final_reward:.2f}{error_flag}")
+        for step in range(1, MAX_STEPS + 1):
+            if result.done:
+                break
 
-        if result.done:
-            break
+            query = get_model_message(client, observation, history)
 
-    return final_reward, steps
+            result = env.step(SQLAction(query=query))
+            observation = result.observation
+
+            reward = result.reward or 0.0
+            done = result.done
+            error = observation.execution_error if observation.execution_error else None
+
+            rewards.append(reward)
+            steps_taken = step
+            last_reward = reward
+
+            log_step(step=step, action=query, reward=reward, done=done, error=error)
+
+            history.append(f"Step {step}: reward={reward:.2f}")
+            if error:
+                history[-1] += f" [ERROR: {error[:50]}]"
+
+            if done:
+                break
+
+        max_total_reward = MAX_STEPS
+        score = sum(rewards) / max_total_reward if max_total_reward > 0 else 0.0
+        score = min(max(score, 0.0), 1.0)
+        success = score >= SUCCESS_SCORE_THRESHOLD
+
+    except Exception as exc:
+        print(f"[DEBUG] Task {task_name} error: {exc}", flush=True)
+
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+    return score
 
 
-def main():
+async def main() -> None:
     """Run baseline inference across all tasks."""
-    print("=" * 60)
-    print("SQL Debugger — Baseline Inference")
-    print("=" * 60)
-    print(f"API: {API_BASE_URL}")
-    print(f"Model: {MODEL_NAME}")
-    print(f"Environment: {ENV_URL}")
-    print()
+    from sql_debugger import SQLDebuggerClient, SQLAction
 
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    total_reward = 0.0
-    results = []
+    print(f"[DEBUG] API: {API_BASE_URL}", flush=True)
+    print(f"[DEBUG] Model: {MODEL_NAME}", flush=True)
+    print(f"[DEBUG] Environment: {ENV_URL}", flush=True)
+    print(f"[DEBUG] Tasks: {len(TASK_SEEDS)} seeds", flush=True)
+
     start_time = time.time()
+    all_scores = []
 
     with SQLDebuggerClient(base_url=ENV_URL).sync() as env:
-        for seed in range(NUM_TASKS):
+        for seed in TASK_SEEDS:
+            # Get task name via reset peek
             result = env.reset(seed=seed)
-            task_id = result.observation.task_id
-            difficulty = result.observation.difficulty
-            print(f"[{seed + 1}/{NUM_TASKS}] Task: {task_id} ({difficulty})")
+            task_name = f"{result.observation.task_id}_{result.observation.difficulty}"
 
-            # Re-reset to start fresh (the above reset was just to get task info)
-            reward, steps = run_episode(env, client, seed)
-            total_reward += reward
-            results.append((task_id, difficulty, reward, steps))
-            print(f"    Result: reward={reward:.2f}, steps={steps}")
-            print()
+            score = await run_task(env, client, seed, task_name)
+            all_scores.append((seed, task_name, score))
 
     elapsed = time.time() - start_time
 
     # Summary
-    print("=" * 60)
-    print("RESULTS SUMMARY")
-    print("=" * 60)
-    print(f"{'Task':<12} {'Difficulty':<10} {'Reward':<10} {'Steps':<6}")
-    print("-" * 40)
-    for task_id, difficulty, reward, steps in results:
-        print(f"{task_id:<12} {difficulty:<10} {reward:<10.2f} {steps:<6}")
-    print("-" * 40)
-    print(f"{'TOTAL':<22} {total_reward:<10.2f}")
-    print(f"{'AVERAGE':<22} {total_reward / NUM_TASKS:<10.2f}")
-    print(f"\nTime elapsed: {elapsed:.1f}s")
-    print(f"Max allowed: 1200s (20 min)")
+    print(f"\n[DEBUG] === RESULTS SUMMARY ===", flush=True)
+    print(f"[DEBUG] {'Seed':<6} {'Task':<30} {'Score':<10}", flush=True)
+    print(f"[DEBUG] {'-' * 46}", flush=True)
+    for seed, task_name, score in all_scores:
+        print(f"[DEBUG] {seed:<6} {task_name:<30} {score:<10.4f}", flush=True)
+    avg = sum(s for _, _, s in all_scores) / len(all_scores) if all_scores else 0
+    print(f"[DEBUG] {'-' * 46}", flush=True)
+    print(f"[DEBUG] {'AVG':<36} {avg:<10.4f}", flush=True)
+    print(f"[DEBUG] Time: {elapsed:.1f}s / 1200s max", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

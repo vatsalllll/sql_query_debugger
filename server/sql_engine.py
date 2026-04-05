@@ -61,6 +61,71 @@ class SQLiteEngine:
         finally:
             self._conn.set_progress_handler(None, 0)
 
+    def explain_query(self, query: str) -> Optional[str]:
+        """Return the SQLite query plan for the given query as a string.
+
+        Executes ``EXPLAIN QUERY PLAN {query}`` and formats each row of the
+        plan into a human-readable string. Returns None if an error occurs.
+        """
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(f"EXPLAIN QUERY PLAN {query}")
+            rows = cursor.fetchall()
+            return "\n".join(str(row) for row in rows)
+        except sqlite3.Error:
+            return None
+
+    def get_table_names(self) -> List[str]:
+        """Return a list of all table names in the current database."""
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            return [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error:
+            return []
+
+    def get_column_names(self, table_name: str) -> List[str]:
+        """Return a list of column names for the given table.
+
+        Uses ``PRAGMA table_info`` to retrieve column metadata. Returns an
+        empty list if the table does not exist or an error occurs.
+        """
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            return [row[1] for row in cursor.fetchall()]
+        except sqlite3.Error:
+            return []
+
+    @staticmethod
+    def categorize_error(error_msg: str) -> str:
+        """Categorize a SQLite error message into a broad error type.
+
+        Args:
+            error_msg: The raw error string returned by SQLite.
+
+        Returns:
+            One of: "syntax", "missing_table", "missing_column",
+            "ambiguous_column", "type_error", "constraint", "timeout",
+            "unknown".
+        """
+        msg = error_msg.lower()
+        if "no such table" in msg:
+            return "missing_table"
+        if "no such column" in msg:
+            return "missing_column"
+        if "ambiguous" in msg:
+            return "ambiguous_column"
+        if "near" in msg or "syntax error" in msg:
+            return "syntax"
+        if "datatype mismatch" in msg or "type" in msg:
+            return "type_error"
+        if "constraint" in msg or "unique" in msg or "not null" in msg or "foreign key" in msg:
+            return "constraint"
+        if "timed out" in msg or "timeout" in msg or "interrupted" in msg:
+            return "timeout"
+        return "unknown"
+
     def reset(self) -> None:
         """Drop the current connection and create a fresh one."""
         if self._conn:

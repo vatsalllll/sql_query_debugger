@@ -442,7 +442,7 @@ def inject_bug(query: str, difficulty: str, seed: int | None = None) -> Tuple[st
         "hard": HARD_INJECTORS,
     }
 
-    pool = injectors.get(difficulty, EASY_INJECTORS)
+    pool = list(injectors.get(difficulty, EASY_INJECTORS))
     rng.shuffle(pool)
 
     for injector in pool:
@@ -460,3 +460,52 @@ def inject_bug(query: str, difficulty: str, seed: int | None = None) -> Tuple[st
 
     # Fallback: keyword typo always works
     return _inject_keyword_typo(query, rng)
+
+
+def inject_multi_bug(
+    query: str,
+    difficulty: str,
+    num_bugs: int = 2,
+    seed: int | None = None,
+) -> Tuple[str, List[InjectedBug]]:
+    """
+    Inject multiple bugs into a correct SQL query for expert-level difficulty.
+
+    Chains multiple injectors, verifying each one actually changes the query
+    and doesn't conflict with previous injections.
+
+    Args:
+        query: A correct SQL query
+        difficulty: Base difficulty for bug selection ("easy", "medium", "hard")
+        num_bugs: Number of bugs to inject (default: 2)
+        seed: Optional seed for reproducibility
+
+    Returns:
+        (broken_query, list_of_bugs)
+    """
+    rng = random.Random(seed)
+    bugs: List[InjectedBug] = []
+    current_query = query
+
+    # Use progressively harder injectors for each bug
+    difficulty_escalation = ["easy", "medium", "hard"]
+    start_idx = difficulty_escalation.index(difficulty) if difficulty in difficulty_escalation else 0
+
+    for i in range(num_bugs):
+        # Escalate difficulty for each successive bug
+        bug_difficulty = difficulty_escalation[min(start_idx + i, len(difficulty_escalation) - 1)]
+        sub_seed = (seed * 31 + i) if seed is not None else None
+
+        broken, bug = inject_bug(current_query, bug_difficulty, seed=sub_seed)
+
+        # Verify this injection actually changed something
+        if broken.strip() != current_query.strip():
+            current_query = broken
+            bugs.append(bug)
+
+    # Ensure at least one bug was injected
+    if not bugs:
+        broken, bug = inject_bug(query, difficulty, seed=seed)
+        return broken, [bug]
+
+    return current_query, bugs
