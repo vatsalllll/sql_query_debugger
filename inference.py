@@ -35,6 +35,7 @@ API_KEY = os.getenv("HF_TOKEN")
 
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 IMAGE_NAME = LOCAL_IMAGE_NAME or "vatsalhf30/sql-debugger"
+HF_SPACE_ID = "VatsalHF30/sql-debugger"
 BENCHMARK = "sql_debugger"
 TASK_NAME = "sql_debug"
 MAX_STEPS = 12
@@ -165,19 +166,71 @@ def get_model_message(
 
 
 # ---------------------------------------------------------------------------
+# Environment connection — try multiple methods
+# ---------------------------------------------------------------------------
+
+async def connect_env() -> SQLDebuggerClient:
+    """Connect to the SQL Debugger environment.
+
+    Tries multiple connection methods in order:
+    1. from_docker_image (if Docker is available)
+    2. from_env with HF Space (fallback)
+    3. Direct WebSocket connection to running HF Space
+    """
+    # Method 1: Docker image (preferred by evaluator)
+    try:
+        print(f"[DEBUG] Trying from_docker_image({IMAGE_NAME})...", flush=True)
+        env = await SQLDebuggerClient.from_docker_image(IMAGE_NAME)
+        print(f"[DEBUG] Connected via Docker image", flush=True)
+        return env
+    except Exception as e:
+        print(f"[DEBUG] Docker image failed: {e}", flush=True)
+
+    # Method 2: from_env with HF Space
+    try:
+        print(f"[DEBUG] Trying from_env({HF_SPACE_ID})...", flush=True)
+        env = await SQLDebuggerClient.from_env(HF_SPACE_ID)
+        print(f"[DEBUG] Connected via from_env", flush=True)
+        return env
+    except Exception as e:
+        print(f"[DEBUG] from_env failed: {e}", flush=True)
+
+    # Method 3: Direct connection to running HF Space
+    try:
+        space_url = f"https://vatsalhf30-sql-debugger.hf.space"
+        print(f"[DEBUG] Trying direct connection to {space_url}...", flush=True)
+        env = SQLDebuggerClient(base_url=space_url)
+        await env.connect()
+        print(f"[DEBUG] Connected via direct WebSocket", flush=True)
+        return env
+    except Exception as e:
+        print(f"[DEBUG] Direct connection failed: {e}", flush=True)
+
+    raise RuntimeError("Could not connect to SQL Debugger environment via any method")
+
+
+# ---------------------------------------------------------------------------
 # Main — async entry point matching OpenEnv evaluation format
 # ---------------------------------------------------------------------------
 
 async def main() -> None:
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    env = await SQLDebuggerClient.from_docker_image(IMAGE_NAME)
-
     history: List[str] = []
     rewards: List[float] = []
     steps_taken = 0
     score = 0.0
     success = False
+
+    env = None
+
+    try:
+        env = await connect_env()
+    except Exception as e:
+        print(f"[DEBUG] FATAL: Could not connect to environment: {e}", flush=True)
+        log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
+        log_end(success=False, steps=0, score=0.0, rewards=[])
+        return
 
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
@@ -214,9 +267,13 @@ async def main() -> None:
         score = min(max(score, 0.0), 1.0)
         success = score >= SUCCESS_SCORE_THRESHOLD
 
+    except Exception as e:
+        print(f"[DEBUG] Error during episode: {e}", flush=True)
+
     finally:
         try:
-            await env.close()
+            if env is not None:
+                await env.close()
         except Exception as e:
             print(f"[DEBUG] env.close() error (container cleanup): {e}", flush=True)
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
