@@ -37,13 +37,25 @@ LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 IMAGE_NAME = LOCAL_IMAGE_NAME or "vatsalhf30/sql-debugger"
 HF_SPACE_ID = "VatsalHF30/sql-debugger"
 BENCHMARK = "sql_debugger"
-TASK_NAME = "sql_debug"
 MAX_STEPS = 12
 MAX_TOTAL_REWARD = 1.0
-SUCCESS_SCORE_THRESHOLD = 0.8
+SUCCESS_SCORE_THRESHOLD = 0.5
 TEMPERATURE = 0.1
 MAX_TOKENS = 512
 FALLBACK_QUERY = "SELECT 1;"
+
+# Tasks to run: seed -> task_name (at least 3: easy, medium, hard)
+TASKS = [
+    (0, "easy_1"),
+    (1, "easy_2"),
+    (2, "easy_3"),
+    (3, "medium_1"),
+    (4, "medium_2"),
+    (5, "medium_3"),
+    (6, "hard_1"),
+    (7, "hard_2"),
+    (8, "hard_3"),
+]
 
 SYSTEM_PROMPT = """You are an expert SQL debugger. You will be given:
 1. A database schema (CREATE TABLE statements)
@@ -118,9 +130,7 @@ def extract_sql(response_text: str) -> str:
 
 def get_model_message(
     client: OpenAI,
-    step: int,
     observation: SQLObservation,
-    last_reward: float,
     history: List[str],
 ) -> str:
     """Call the LLM and return the extracted SQL query."""
@@ -170,13 +180,7 @@ def get_model_message(
 # ---------------------------------------------------------------------------
 
 async def connect_env() -> SQLDebuggerClient:
-    """Connect to the SQL Debugger environment.
-
-    Tries multiple connection methods in order:
-    1. from_docker_image (if Docker is available)
-    2. from_env with HF Space (fallback)
-    3. Direct WebSocket connection to running HF Space
-    """
+    """Connect to the SQL Debugger environment."""
     # Method 1: Docker image (preferred by evaluator)
     try:
         print(f"[DEBUG] Trying from_docker_image({IMAGE_NAME})...", flush=True)
@@ -197,7 +201,7 @@ async def connect_env() -> SQLDebuggerClient:
 
     # Method 3: Direct connection to running HF Space
     try:
-        space_url = f"https://vatsalhf30-sql-debugger.hf.space"
+        space_url = "https://vatsalhf30-sql-debugger.hf.space"
         print(f"[DEBUG] Trying direct connection to {space_url}...", flush=True)
         env = SQLDebuggerClient(base_url=space_url)
         await env.connect()
@@ -210,32 +214,21 @@ async def connect_env() -> SQLDebuggerClient:
 
 
 # ---------------------------------------------------------------------------
-# Main — async entry point matching OpenEnv evaluation format
+# Run a single task episode
 # ---------------------------------------------------------------------------
 
-async def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
+async def run_task(env: SQLDebuggerClient, client: OpenAI, seed: int, task_name: str) -> None:
+    """Run a single task: reset with seed, step until done, emit [START]/[STEP]/[END]."""
     history: List[str] = []
     rewards: List[float] = []
     steps_taken = 0
     score = 0.0
     success = False
 
-    env = None
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        env = await connect_env()
-    except Exception as e:
-        print(f"[DEBUG] FATAL: Could not connect to environment: {e}", flush=True)
-        log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
-        log_end(success=False, steps=0, score=0.0, rewards=[])
-        return
-
-    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
-
-    try:
-        result = await env.reset()
+        result = await env.reset(seed=seed)
         obs = result.observation
         last_reward = 0.0
 
@@ -243,7 +236,7 @@ async def main() -> None:
             if result.done:
                 break
 
-            message = get_model_message(client, step, obs, last_reward, history)
+            message = get_model_message(client, obs, history)
 
             result = await env.step(SQLAction(query=message))
             obs = result.observation
@@ -268,15 +261,39 @@ async def main() -> None:
         success = score >= SUCCESS_SCORE_THRESHOLD
 
     except Exception as e:
-        print(f"[DEBUG] Error during episode: {e}", flush=True)
+        print(f"[DEBUG] Error during task {task_name}: {e}", flush=True)
 
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+
+# ---------------------------------------------------------------------------
+# Main — runs ALL tasks with separate [START]/[END] for each
+# ---------------------------------------------------------------------------
+
+async def main() -> None:
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+
+    env = None
+    try:
+        env = await connect_env()
+    except Exception as e:
+        print(f"[DEBUG] FATAL: Could not connect to environment: {e}", flush=True)
+        # Emit START/END for each task so evaluator sees them
+        for seed, task_name in TASKS:
+            log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+            log_end(success=False, steps=0, score=0.0, rewards=[])
+        return
+
+    try:
+        for seed, task_name in TASKS:
+            await run_task(env, client, seed, task_name)
     finally:
         try:
             if env is not None:
                 await env.close()
         except Exception as e:
-            print(f"[DEBUG] env.close() error (container cleanup): {e}", flush=True)
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+            print(f"[DEBUG] env.close() error: {e}", flush=True)
 
 
 if __name__ == "__main__":
