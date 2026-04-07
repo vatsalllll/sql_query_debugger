@@ -506,7 +506,7 @@ class CompositeRubric:
             + w.get("quality", 0.0) * quality
             + w.get("diagnostic", 0.0) * diagnostic
         )
-        total_reward = max(-1.0, min(1.0, weighted + regression))
+        total_reward = max(0.01, min(0.99, weighted + regression))
 
         done = correctness == 1.0 or step_count >= max_steps
 
